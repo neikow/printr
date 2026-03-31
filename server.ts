@@ -1,9 +1,9 @@
-const express = require('express');
-const multer = require('multer');
-const { spawn, exec } = require('child_process');
-const path = require('path');
-const fs = require('fs');
-const os = require('os');
+import express, { Request, Response } from 'express';
+import multer from 'multer';
+import { spawn, exec } from 'child_process';
+import path from 'path';
+import fs from 'fs';
+import os from 'os';
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -27,12 +27,15 @@ const upload = multer({
   limits: { fileSize: 100 * 1024 * 1024 }, // 100 MB
 });
 
-app.use(express.static(path.join(__dirname, 'public')));
 app.use(express.json());
+
+// Serve static files from Vite build in production
+const clientBuildPath = path.join(__dirname, 'client', 'dist');
+app.use(express.static(clientBuildPath));
 
 // ── Printers ────────────────────────────────────────────────────────────────
 
-app.get('/api/printers', (req, res) => {
+app.get('/api/printers', (req: Request, res: Response) => {
   exec('lpstat -p 2>/dev/null', (err, stdout) => {
     const printers = parsePrinters(stdout || '');
 
@@ -47,7 +50,7 @@ app.get('/api/printers', (req, res) => {
   });
 });
 
-function parsePrinters(output) {
+function parsePrinters(output: string) {
   const printers = [];
   for (const line of output.split('\n')) {
     const m = line.match(/^printer\s+(\S+)\s+is\s+(\w+)/i);
@@ -64,7 +67,7 @@ function parsePrinters(output) {
 
 // ── Print ────────────────────────────────────────────────────────────────────
 
-app.post('/api/print', upload.single('file'), async (req, res) => {
+app.post('/api/print', upload.single('file'), async (req: Request, res: Response): Promise<any> => {
   if (!req.file) {
     return res.status(400).json({ error: 'No file provided.' });
   }
@@ -82,7 +85,7 @@ app.post('/api/print', upload.single('file'), async (req, res) => {
 
   let filePath = req.file.path;
   const ext = path.extname(req.file.originalname).toLowerCase();
-  let convertedPath = null;
+  let convertedPath: string | null = null;
 
   const officeExts = ['.doc', '.docx', '.odt', '.ppt', '.pptx', '.xls', '.xlsx'];
 
@@ -99,14 +102,14 @@ app.post('/api/print', upload.single('file'), async (req, res) => {
       try {
         convertedPath = await convertToPDF(loPath, filePath);
         filePath = convertedPath;
-      } catch (convErr) {
+      } catch (convErr: any) {
         cleanup(req.file.path);
         return res.status(500).json({ error: 'Conversion failed: ' + convErr.message });
       }
     }
 
     // Build args for `lp`
-    const args = [];
+    const args: string[] = [];
 
     if (printer) {
       args.push('-d', printer);
@@ -121,7 +124,7 @@ app.post('/api/print', upload.single('file'), async (req, res) => {
 
     if (orientation === 'landscape') args.push('-o', 'landscape');
 
-    const sidesMap = { long: 'two-sided-long-edge', short: 'two-sided-short-edge', none: 'one-sided' };
+    const sidesMap: Record<string, string> = { long: 'two-sided-long-edge', short: 'two-sided-short-edge', none: 'one-sided' };
     args.push('-o', `sides=${sidesMap[duplex] || 'one-sided'}`);
 
     const sanitizedRange = (pageRange || '').replace(/[^0-9,\-]/g, '').trim();
@@ -138,14 +141,14 @@ app.post('/api/print', upload.single('file'), async (req, res) => {
     if (convertedPath) cleanup(convertedPath);
 
     res.json({ success: true, message: result || 'Print job submitted.' });
-  } catch (err) {
+  } catch (err: any) {
     cleanup(req.file.path);
     if (convertedPath) cleanup(convertedPath);
     res.status(500).json({ error: err.message });
   }
 });
 
-function spawnPrint(args) {
+function spawnPrint(args: string[]): Promise<string> {
   return new Promise((resolve, reject) => {
     const proc = spawn('lp', args);
     let stdout = '';
@@ -161,7 +164,7 @@ function spawnPrint(args) {
 
 // ── Print queue ──────────────────────────────────────────────────────────────
 
-app.get('/api/jobs', (req, res) => {
+app.get('/api/jobs', (req: Request, res: Response) => {
   exec('lpq -a 2>/dev/null', (err, stdout) => {
     const raw = (stdout || '').trim();
     if (!raw || raw.toLowerCase().includes('no entries')) {
@@ -181,7 +184,7 @@ app.get('/api/jobs', (req, res) => {
 
 // ── LibreOffice helpers ──────────────────────────────────────────────────────
 
-function getLibreOfficePath() {
+function getLibreOfficePath(): string | null {
   const candidates = [
     '/Applications/LibreOffice.app/Contents/MacOS/soffice',
     '/usr/local/bin/soffice',
@@ -197,7 +200,7 @@ function getLibreOfficePath() {
   return null;
 }
 
-function convertToPDF(loPath, inputPath) {
+function convertToPDF(loPath: string, inputPath: string): Promise<string> {
   return new Promise((resolve, reject) => {
     const outDir = path.dirname(inputPath);
     const proc = spawn(loPath, ['--headless', '--convert-to', 'pdf', '--outdir', outDir, inputPath]);
@@ -212,14 +215,20 @@ function convertToPDF(loPath, inputPath) {
   });
 }
 
-function cleanup(filePath) {
+function cleanup(filePath: string) {
   try { fs.unlinkSync(filePath); } catch (_) {}
 }
+
+// Fallback to serve index.html for React Router / SPA
+app.get('*', (req: Request, res: Response) => {
+  res.sendFile(path.join(clientBuildPath, 'index.html'));
+});
 
 // ── Start ────────────────────────────────────────────────────────────────────
 
 function getLocalIP() {
   for (const ifaces of Object.values(os.networkInterfaces())) {
+    if (!ifaces) continue;
     for (const iface of ifaces) {
       if (iface.family === 'IPv4' && !iface.internal) return iface.address;
     }
@@ -227,7 +236,7 @@ function getLocalIP() {
   return 'your-mac-mini-ip';
 }
 
-app.listen(PORT, '0.0.0.0', () => {
+app.listen(Number(PORT), '0.0.0.0', () => {
   const ip = getLocalIP();
   console.log('\n  Printr is running!');
   console.log(`  Local:   http://localhost:${PORT}`);
