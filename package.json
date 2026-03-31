@@ -3,6 +3,9 @@
   "version": "1.0.0",
   "description": "Local web printing interface hosted on Mac Mini",
   "main": "server.ts",
+  "workspaces": [
+    "client"
+  ],
   "scripts": {
     "start": "ts-node server.ts",
     "dev:server": "nodemon --watch server.ts --exec ts-node server.ts",
