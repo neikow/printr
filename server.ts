@@ -250,7 +250,7 @@ function cleanup(filePath: string) {
 }
 
 // Fallback to serve index.html for React Router / SPA
-app.get('*', (req: Request, res: Response) => {
+app.get('/*splat', (req: Request, res: Response) => {
   res.sendFile(path.join(clientBuildPath, 'index.html'));
 });
 
