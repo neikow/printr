@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
+import { usePrintStore } from './store';
 
 // Helpers
 function formatFileSize(bytes: number) {
@@ -149,15 +150,17 @@ function App() {
   const [printing, setPrinting] = useState(false);
   const [dragOver, setDragOver] = useState(false);
 
-  // Print settings
-  const [printer, setPrinter] = useState('');
-  const [copies, setCopies] = useState<string | number>(1);
-  const [colorMode, setColorMode] = useState('color');
-  const [paperSize, setPaperSize] = useState('letter');
-  const [orientation, setOrientation] = useState('portrait');
-  const [duplex, setDuplex] = useState('none');
-  const [pageRange, setPageRange] = useState('');
-  const [quality, setQuality] = useState('4');
+  // Print settings from store
+  const {
+    printer, setPrinter,
+    copies, setCopies,
+    colorMode, setColorMode,
+    paperSize, setPaperSize,
+    orientation, setOrientation,
+    duplex, setDuplex,
+    pageRange, setPageRange,
+    quality, setQuality,
+  } = usePrintStore();
 
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -180,13 +183,21 @@ function App() {
     fetch('/api/printers')
       .then(res => res.json())
       .then(data => {
-        setPrinters(data.printers || []);
+        const available = data.printers || [];
+        setPrinters(available);
         setDefaultPrinter(data.default);
-        if (data.default) setPrinter(data.default);
-        else if (data.printers?.length) setPrinter(data.printers[0].name);
+        
+        const currentPrinter = usePrintStore.getState().printer;
+        const isValid = available.some((p: any) => p.name === currentPrinter);
+        
+        if (!isValid) {
+          if (data.default) setPrinter(data.default);
+          else if (available.length) setPrinter(available[0].name);
+          else setPrinter('');
+        }
       })
       .catch(() => showToast('error', 'Could not reach server'));
-  }, [showToast]);
+  }, [showToast, setPrinter]);
 
   useEffect(() => {
     const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
@@ -384,11 +395,11 @@ function App() {
             <div className="field">
               <label>Copies</label>
               <div className="copies-row">
-                <button className="copies-btn" onClick={() => setCopies(c => Math.max(1, Number(c) - 1))} aria-label="Fewer copies">
+                <button className="copies-btn" onClick={() => setCopies(Math.max(1, Number(copies) - 1))} aria-label="Fewer copies">
                   <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><line x1="5" y1="12" x2="19" y2="12"/></svg>
                 </button>
-                <input type="number" value={copies} onChange={e => setCopies(e.target.value)} onBlur={() => setCopies(c => Math.min(99, Math.max(1, Number(c) || 1)))} aria-label="Number of copies" />
-                <button className="copies-btn" onClick={() => setCopies(c => Math.min(99, Number(c) + 1))} aria-label="More copies">
+                <input type="number" value={copies} onChange={e => setCopies(e.target.value)} onBlur={() => setCopies(Math.min(99, Math.max(1, Number(copies) || 1)))} aria-label="Number of copies" />
+                <button className="copies-btn" onClick={() => setCopies(Math.min(99, Number(copies) + 1))} aria-label="More copies">
                   <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
                 </button>
               </div>
