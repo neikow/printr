@@ -134,12 +134,19 @@ function Toast({ id, type, title, message, onRemove }: ToastProps) {
   );
 }
 
+interface PrintFile {
+  id: string;
+  file: File;
+  status: 'pending' | 'uploading' | 'processing' | 'printing' | 'done' | 'error';
+  progress: number;
+  message?: string;
+}
+
 function App() {
-  const [file, setFile] = useState<File | null>(null);
+  const [files, setFiles] = useState<PrintFile[]>([]);
   const [printers, setPrinters] = useState<any[]>([]);
   const [, setDefaultPrinter] = useState<string | null>(null);
   const [printing, setPrinting] = useState(false);
-  const [progress, setProgress] = useState(0);
   const [dragOver, setDragOver] = useState(false);
 
   // Print settings
@@ -155,17 +162,19 @@ function App() {
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
+  const clientId = useRef(Math.random().toString(36).substring(2, 9));
+
   const [toasts, setToasts] = useState<any[]>([]);
   let toastIdCounter = useRef(0);
 
-  const showToast = (type: 'success' | 'error' | 'info', title: string, message?: string) => {
+  const showToast = useCallback((type: 'success' | 'error' | 'info', title: string, message?: string) => {
     const id = ++toastIdCounter.current;
     setToasts(prev => [...prev, { id, type, title, message }]);
-  };
+  }, []);
 
-  const removeToast = (id: number) => {
+  const removeToast = useCallback((id: number) => {
     setToasts(prev => prev.filter(t => t.id !== id));
-  };
+  }, []);
 
   useEffect(() => {
     fetch('/api/printers')
@@ -177,6 +186,33 @@ function App() {
         else if (data.printers?.length) setPrinter(data.printers[0].name);
       })
       .catch(() => showToast('error', 'Could not reach server'));
+  }, [showToast]);
+
+  useEffect(() => {
+    const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+    const wsUrl = `${protocol}//${window.location.host}/ws?clientId=${clientId.current}`;
+    
+    const ws = new WebSocket(wsUrl);
+
+    ws.onmessage = (event) => {
+      try {
+        const data = JSON.parse(event.data);
+        if (data.fileId && data.status) {
+          setFiles(prev => prev.map(f => {
+            if (f.id === data.fileId) {
+              return { ...f, status: data.status, message: data.message || f.message };
+            }
+            return f;
+          }));
+        }
+      } catch (e) {
+        console.error("Failed to parse WS message", e);
+      }
+    };
+
+    return () => {
+      ws.close();
+    };
   }, []);
 
   const handleDragOver = useCallback((e: React.DragEvent) => {
@@ -192,69 +228,101 @@ function App() {
   const handleDrop = useCallback((e: React.DragEvent) => {
     e.preventDefault();
     setDragOver(false);
-    if (e.dataTransfer.files && e.dataTransfer.files[0]) {
-      setFile(e.dataTransfer.files[0]);
+    if (e.dataTransfer.files?.length) {
+      const newFiles = Array.from(e.dataTransfer.files).map(f => ({
+        id: Math.random().toString(36).substring(2, 9),
+        file: f,
+        status: 'pending' as const,
+        progress: 0
+      }));
+      setFiles(prev => [...prev, ...newFiles]);
     }
   }, []);
 
   const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-    if (e.target.files && e.target.files[0]) {
-      setFile(e.target.files[0]);
+    if (e.target.files?.length) {
+      const newFiles = Array.from(e.target.files).map(f => ({
+        id: Math.random().toString(36).substring(2, 9),
+        file: f,
+        status: 'pending' as const,
+        progress: 0
+      }));
+      setFiles(prev => [...prev, ...newFiles]);
     }
     e.target.value = '';
   };
 
+  const removeFile = (id: string, e: React.MouseEvent) => {
+    e.stopPropagation();
+    setFiles(prev => prev.filter(f => f.id !== id));
+  };
+
   const handlePrint = async () => {
-    if (!file || printing) return;
+    const pendingFiles = files.filter(f => f.status === 'pending' || f.status === 'error');
+    if (!pendingFiles.length || printing) return;
     
     setSidebarOpen(false);
     setPrinting(true);
-    setProgress(0);
 
-    const fd = new FormData();
-    fd.append('file', file, file.name);
-    fd.append('printer', printer);
-    fd.append('copies', copies.toString());
-    fd.append('colorMode', colorMode);
-    fd.append('paperSize', paperSize);
-    fd.append('orientation', orientation);
-    fd.append('duplex', duplex);
-    fd.append('pageRange', pageRange);
-    fd.append('quality', quality);
+    const promises = pendingFiles.map(async (f) => {
+      setFiles(prev => prev.map(p => p.id === f.id ? { ...p, status: 'uploading', progress: 0 } : p));
+      
+      const fd = new FormData();
+      fd.append('file', f.file, f.file.name);
+      fd.append('printer', printer);
+      fd.append('copies', copies.toString());
+      fd.append('colorMode', colorMode);
+      fd.append('paperSize', paperSize);
+      fd.append('orientation', orientation);
+      fd.append('duplex', duplex);
+      fd.append('pageRange', pageRange);
+      fd.append('quality', quality);
+      fd.append('clientId', clientId.current);
+      fd.append('fileId', f.id);
 
-    try {
-      const xhr = new XMLHttpRequest();
-      xhr.open('POST', '/api/print');
+      try {
+        const xhr = new XMLHttpRequest();
+        xhr.open('POST', '/api/print');
 
-      const promise = new Promise((resolve, reject) => {
-        xhr.upload.addEventListener('progress', (e) => {
-          if (e.lengthComputable) {
-            setProgress(Math.round((e.loaded / e.total) * 100));
-          }
+        const promise = new Promise((resolve, reject) => {
+          xhr.upload.addEventListener('progress', (e) => {
+            if (e.lengthComputable) {
+              const progress = Math.round((e.loaded / e.total) * 100);
+              setFiles(prev => prev.map(p => p.id === f.id ? { ...p, progress } : p));
+            }
+          });
+          xhr.addEventListener('load', () => {
+            let body: any = {};
+            try { body = JSON.parse(xhr.responseText); } catch {}
+            if (xhr.status >= 200 && xhr.status < 300) resolve(body);
+            else reject(new Error(body.error || `HTTP ${xhr.status}`));
+          });
+          xhr.addEventListener('error', () => reject(new Error('Network error — check your connection.')));
+          xhr.addEventListener('abort', () => reject(new Error('Upload cancelled.')));
+          xhr.send(fd);
         });
-        xhr.addEventListener('load', () => {
-          let body: any = {};
-          try { body = JSON.parse(xhr.responseText); } catch {}
-          if (xhr.status >= 200 && xhr.status < 300) resolve(body);
-          else reject(new Error(body.error || `HTTP ${xhr.status}`));
-        });
-        xhr.addEventListener('error', () => reject(new Error('Network error — check your connection.')));
-        xhr.addEventListener('abort', () => reject(new Error('Upload cancelled.')));
-        xhr.send(fd);
-      });
 
-      const result: any = await promise;
-      setFile(null);
-      showToast('success', 'Sent to printer!', result.message || 'Your document is printing.');
-    } catch (err: any) {
-      showToast('error', 'Print failed', err.message || 'Something went wrong. Please try again.');
-    } finally {
-      setPrinting(false);
-      setProgress(0);
+        const result: any = await promise;
+        // WS events (processing, printing, done) will handle further status updates
+        setFiles(prev => prev.map(p => p.id === f.id ? { ...p, status: 'done', message: result.message || 'Job submitted successfully.' } : p));
+      } catch (err: any) {
+        setFiles(prev => prev.map(p => p.id === f.id ? { ...p, status: 'error', message: err.message || 'Something went wrong.' } : p));
+      }
+    });
+
+    await Promise.allSettled(promises);
+    setPrinting(false);
+    
+    const errors = files.filter(f => f.status === 'error');
+    if (errors.length) {
+      showToast('error', 'Print issues', 'Some files failed to print.');
+    } else {
+      showToast('success', 'Sent to printer!', 'All documents have been submitted.');
     }
   };
 
   const selectedPrinterObj = printers.find(p => p.name === printer);
+  const pendingOrErrorCount = files.filter(f => f.status === 'pending' || f.status === 'error').length;
 
   return (
     <>
@@ -403,16 +471,16 @@ function App() {
         <main className="main">
           <div className="dropzone-wrapper">
             <div 
-              className={`dropzone ${dragOver ? 'drag-over' : ''} ${file ? 'has-file' : ''}`}
+              className={`dropzone ${dragOver ? 'drag-over' : ''} ${files.length ? 'has-file' : ''}`}
               tabIndex={0} 
               role="button" 
               onClick={(e) => {
-                if (!file && !(e.target as HTMLElement).closest('.file-clear')) {
+                if (!(e.target as HTMLElement).closest('.file-clear')) {
                   fileInputRef.current?.click();
                 }
               }}
               onKeyDown={(e) => {
-                if ((e.key === 'Enter' || e.key === ' ') && !file) {
+                if ((e.key === 'Enter' || e.key === ' ')) {
                   e.preventDefault();
                   fileInputRef.current?.click();
                 }
@@ -422,7 +490,7 @@ function App() {
               onDragLeave={handleDragLeave}
               onDrop={handleDrop}
             >
-              {!file ? (
+              {files.length === 0 ? (
                 <div className="dz-empty">
                   <div className="dz-icon">
                     <svg viewBox="0 0 64 64" fill="none">
@@ -435,28 +503,45 @@ function App() {
                       <line x1="41" y1="46" x2="51" y2="46" stroke="white" strokeWidth="2.5" strokeLinecap="round"/>
                     </svg>
                   </div>
-                  <h2>Drop your file here</h2>
+                  <h2>Drop files here</h2>
                   <p>or <span className="browse-link">click to browse</span></p>
                   <div className="formats">
                     <span>PDF</span><span>JPG</span><span>PNG</span><span>TXT</span><span>DOCX</span>
                   </div>
                 </div>
               ) : (
-                <div className="dz-file">
-                  <div className="file-icon-wrap">{getFileIcon(file)}</div>
-                  <div className="file-info">
-                    <p className="file-name">{file.name}</p>
-                    <p className="file-meta">{formatFileSize(file.size)} &middot; {getFileTypeLabel(file)}</p>
+                <div className="file-list">
+                  {files.map(f => (
+                    <div key={f.id} className="dz-file">
+                      <div className="file-icon-wrap">{getFileIcon(f.file)}</div>
+                      <div className="file-info">
+                        <p className="file-name">{f.file.name}</p>
+                        <p className="file-meta">
+                          {formatFileSize(f.file.size)} &middot; {getFileTypeLabel(f.file)} 
+                          <span className={`file-status-text status-${f.status}`}>{f.status}</span>
+                        </p>
+                        {f.status === 'uploading' && (
+                          <div className="mini-progress-bar-wrap">
+                            <div className="mini-progress-bar" style={{ width: `${f.progress}%` }}></div>
+                          </div>
+                        )}
+                        {f.message && <p className="file-msg">{f.message}</p>}
+                      </div>
+                      <button className="file-clear" aria-label="Remove file" onClick={(e) => removeFile(f.id, e)}>
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+                      </button>
+                    </div>
+                  ))}
+                  
+                  <div className="dz-add-more">
+                    <span>Drop more files or </span><span className="browse-link">click to browse</span>
                   </div>
-                  <button className="file-clear" aria-label="Remove file" onClick={(e) => { e.stopPropagation(); setFile(null); }}>
-                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
-                  </button>
                 </div>
               )}
 
               <div className="dz-drag-overlay">
                 <svg viewBox="0 0 64 64" fill="none"><path d="M32 12 L32 44 M18 30 L32 44 L46 30" stroke="white" strokeWidth="4" strokeLinecap="round" strokeLinejoin="round"/><rect x="12" y="48" width="40" height="6" rx="3" fill="white" opacity="0.6"/></svg>
-                <p>Release to select</p>
+                <p>Release to add files</p>
               </div>
             </div>
 
@@ -464,29 +549,26 @@ function App() {
               type="file" 
               ref={fileInputRef}
               hidden 
+              multiple
               accept=".pdf,.jpg,.jpeg,.png,.gif,.tiff,.tif,.bmp,.webp,.txt,.doc,.docx,.odt,.ppt,.pptx,.xls,.xlsx" 
               onChange={handleFileChange}
             />
 
-            <button className="print-btn" disabled={!file || printing} onClick={handlePrint}>
+            <button className="print-btn" disabled={pendingOrErrorCount === 0 || printing} onClick={handlePrint}>
               {!printing && (
                 <span className="print-btn-icon">
                   <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polyline points="6 9 6 2 18 2 18 9"/><path d="M6 18H4a2 2 0 0 1-2-2v-5a2 2 0 0 1 2-2h16a2 2 0 0 1 2 2v5a2 2 0 0 1-2 2h-2"/><rect x="6" y="14" width="12" height="8"/></svg>
                 </span>
               )}
-              <span className="print-btn-label">{printing ? 'Printing…' : 'Print'}</span>
+              <span className="print-btn-label">
+                {printing ? 'Processing…' : `Print ${pendingOrErrorCount} File${pendingOrErrorCount !== 1 ? 's' : ''}`}
+              </span>
               {printing && (
                 <span className="print-spinner">
                   <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><circle cx="12" cy="12" r="9" strokeOpacity="0.25"/><path d="M12 3 A9 9 0 0 1 21 12" strokeLinecap="round"/></svg>
                 </span>
               )}
             </button>
-
-            {printing && (
-              <div className="progress-wrap">
-                <div className="progress-bar" style={{ width: `${progress}%` }}></div>
-              </div>
-            )}
           </div>
         </main>
       </div>

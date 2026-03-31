@@ -4,6 +4,7 @@ import { spawn, exec } from 'child_process';
 import path from 'path';
 import fs from 'fs';
 import os from 'os';
+import { WebSocketServer, WebSocket } from 'ws';
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -32,6 +33,27 @@ app.use(express.json());
 // Serve static files from Vite build in production
 const clientBuildPath = path.join(__dirname, 'client', 'dist');
 app.use(express.static(clientBuildPath));
+
+// WebSockets for tracking progress
+const wss = new WebSocketServer({ noServer: true });
+const clients = new Map<string, WebSocket>();
+
+wss.on('connection', (ws, req) => {
+  const url = new URL(req.url || '', `http://${req.headers.host || 'localhost'}`);
+  const clientId = url.searchParams.get('clientId');
+  if (clientId) {
+    clients.set(clientId, ws);
+    ws.on('close', () => clients.delete(clientId));
+  }
+});
+
+const notifyClient = (clientId: string | undefined, fileId: string | undefined, status: string, message?: string) => {
+  if (!clientId || !fileId) return;
+  const ws = clients.get(clientId);
+  if (ws && ws.readyState === WebSocket.OPEN) {
+    ws.send(JSON.stringify({ fileId, status, message }));
+  }
+};
 
 // ── Printers ────────────────────────────────────────────────────────────────
 
@@ -81,6 +103,8 @@ app.post('/api/print', upload.single('file'), async (req: Request, res: Response
     duplex = 'none',
     pageRange = '',
     quality = '4',
+    clientId,
+    fileId,
   } = req.body;
 
   let filePath = req.file.path;
@@ -94,19 +118,23 @@ app.post('/api/print', upload.single('file'), async (req: Request, res: Response
       const loPath = getLibreOfficePath();
       if (!loPath) {
         cleanup(filePath);
-        return res.status(400).json({
-          error:
-            'Office documents require LibreOffice. Install it from libreoffice.org, or convert the file to PDF first.',
-        });
+        const err = 'Office documents require LibreOffice installed on the server.';
+        notifyClient(clientId, fileId, 'error', err);
+        return res.status(400).json({ error: err });
       }
       try {
+        notifyClient(clientId, fileId, 'processing', 'Converting to PDF...');
         convertedPath = await convertToPDF(loPath, filePath);
         filePath = convertedPath;
       } catch (convErr: any) {
         cleanup(req.file.path);
-        return res.status(500).json({ error: 'Conversion failed: ' + convErr.message });
+        const err = 'Conversion failed: ' + convErr.message;
+        notifyClient(clientId, fileId, 'error', err);
+        return res.status(500).json({ error: err });
       }
     }
+
+    notifyClient(clientId, fileId, 'printing', 'Sending to printer queue...');
 
     // Build args for `lp`
     const args: string[] = [];
@@ -140,10 +168,12 @@ app.post('/api/print', upload.single('file'), async (req: Request, res: Response
     cleanup(req.file.path);
     if (convertedPath) cleanup(convertedPath);
 
+    notifyClient(clientId, fileId, 'done', 'Job submitted successfully.');
     res.json({ success: true, message: result || 'Print job submitted.' });
   } catch (err: any) {
     cleanup(req.file.path);
     if (convertedPath) cleanup(convertedPath);
+    notifyClient(clientId, fileId, 'error', err.message);
     res.status(500).json({ error: err.message });
   }
 });
@@ -236,10 +266,19 @@ function getLocalIP() {
   return 'your-mac-mini-ip';
 }
 
-app.listen(Number(PORT), '0.0.0.0', () => {
+const server = app.listen(Number(PORT), '0.0.0.0', () => {
   const ip = getLocalIP();
   console.log('\n  Printr is running!');
   console.log(`  Local:   http://localhost:${PORT}`);
   console.log(`  Network: http://${ip}:${PORT}\n`);
   console.log('  Share the Network URL with devices on the same Wi-Fi.\n');
+});
+
+server.on('upgrade', (request, socket, head) => {
+  const url = new URL(request.url || '', `http://${request.headers.host || 'localhost'}`);
+  if (url.pathname === '/ws') {
+    wss.handleUpgrade(request, socket, head, ws => {
+      wss.emit('connection', ws, request);
+    });
+  }
 });
